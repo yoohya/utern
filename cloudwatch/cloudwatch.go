@@ -41,9 +41,11 @@ func NewClient(conf *cfg.Config) *Client {
 	var opts []func(*awsconfig.LoadOptions) error
 
 	if conf.Profile != "" {
+		log.Printf("[DEBUG] Using AWS profile: %s", conf.Profile)
 		opts = append(opts, awsconfig.WithSharedConfigProfile(conf.Profile))
 	}
 	if conf.Region != "" {
+		log.Printf("[DEBUG] Using AWS region: %s", conf.Region)
 		opts = append(opts, awsconfig.WithRegion(conf.Region))
 	}
 	// AWS SSOは自動的にサポートされます
