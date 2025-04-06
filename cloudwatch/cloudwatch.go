@@ -40,9 +40,6 @@ func NewClient(conf *cfg.Config) *Client {
 	ctx := context.Background()
 	var opts []func(*awsconfig.LoadOptions) error
 
-	log.Printf("[DEBUG] Using AWS profile: %s", conf.Profile)
-	log.Printf("[DEBUG] Using AWS region: %s", conf.Region)
-
 	if conf.Profile != "" {
 		opts = append(opts, awsconfig.WithSharedConfigProfile(conf.Profile))
 	}

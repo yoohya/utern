@@ -98,7 +98,6 @@ func main() {
 		if err != nil {
 			return errors.Wrap(err, "option error")
 		}
-		log.Printf("[DEBUG] Config: %#v", *config)
 		return run(config)
 	}
 
