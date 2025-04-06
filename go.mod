@@ -1,4 +1,4 @@
-module github.com/knqyf263/utern
+module github.com/yoohya/utern
 
 require (
 	github.com/aws/aws-sdk-go-v2 v1.36.3

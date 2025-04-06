@@ -15,10 +15,10 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs/types"
 	"github.com/briandowns/spinner"
 	c "github.com/fatih/color"
-	"github.com/knqyf263/utern/cache"
-	"github.com/knqyf263/utern/color"
-	cfg "github.com/knqyf263/utern/config"
 	"github.com/pkg/errors"
+	"github.com/yoohya/utern/cache"
+	"github.com/yoohya/utern/color"
+	cfg "github.com/yoohya/utern/config"
 )
 
 var seenGroup = new(sync.Map)
