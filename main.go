@@ -8,10 +8,10 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/knqyf263/utern/cloudwatch"
-	"github.com/knqyf263/utern/config"
 	"github.com/pkg/errors"
 	"github.com/urfave/cli"
+	"github.com/yoohya/utern/cloudwatch"
+	"github.com/yoohya/utern/config"
 )
 
 var (
