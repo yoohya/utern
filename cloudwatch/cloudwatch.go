@@ -9,16 +9,15 @@ import (
 	"sync"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/awserr"
-	"github.com/aws/aws-sdk-go/aws/credentials/stscreds"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/cloudwatchlogs"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
+	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs/types"
 	"github.com/briandowns/spinner"
 	c "github.com/fatih/color"
 	"github.com/knqyf263/utern/cache"
 	"github.com/knqyf263/utern/color"
-	"github.com/knqyf263/utern/config"
+	cfg "github.com/knqyf263/utern/config"
 	"github.com/pkg/errors"
 )
 
@@ -27,35 +26,35 @@ var seenStream = new(sync.Map)
 
 // Client represents CloudWatch Logs client
 type Client struct {
-	client *cloudwatchlogs.CloudWatchLogs
-	config *config.Config
+	client *cloudwatchlogs.Client
+	config *cfg.Config
 }
 
 type logEvent struct {
 	logGroupName string
-	event        *cloudwatchlogs.FilteredLogEvent
+	event        *types.FilteredLogEvent
 }
 
 // NewClient creates a new instance of the CLoudWatch Logs client
-func NewClient(conf *config.Config) *Client {
-	opts := session.Options{
-		SharedConfigState: session.SharedConfigEnable,
-		AssumeRoleTokenProvider: func() (string, error) {
-			if conf.Code != "" {
-				return conf.Code, nil
-			}
-			return stscreds.StdinTokenProvider()
-		},
-		Config: aws.Config{
-			Region: aws.String(conf.Region),
-		},
-	}
+func NewClient(conf *cfg.Config) *Client {
+	ctx := context.Background()
+	var opts []func(*awsconfig.LoadOptions) error
+
 	if conf.Profile != "" {
-		opts.Profile = conf.Profile
+		opts = append(opts, awsconfig.WithSharedConfigProfile(conf.Profile))
 	}
-	sess := session.Must(session.NewSessionWithOptions(opts))
+	if conf.Region != "" {
+		opts = append(opts, awsconfig.WithRegion(conf.Region))
+	}
+	// AWS SSOは自動的にサポートされます
+
+	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, opts...)
+	if err != nil {
+		log.Fatalf("unable to load SDK config, %v", err)
+	}
+
 	return &Client{
-		client: cloudwatchlogs.New(sess),
+		client: cloudwatchlogs.NewFromConfig(awsCfg),
 		config: conf,
 	}
 }
@@ -155,29 +154,6 @@ func (cwl *Client) tail(ctx context.Context, logGroupName string,
 	start chan struct{}, ch chan *logEvent, errch chan error) error {
 	lastEventTime := aws.Int64(cwl.config.StartTime.UTC().Unix() * 1000)
 
-	fn := func(res *cloudwatchlogs.FilterLogEventsOutput, lastPage bool) bool {
-		for _, event := range res.Events {
-			if cache.Cache.Load(logGroupName, event.EventId) {
-				continue
-			}
-			cache.Cache.Store(logGroupName, event.EventId, event.Timestamp)
-			ch <- &logEvent{
-				logGroupName: logGroupName,
-				event:        event,
-			}
-
-			if *event.Timestamp > *lastEventTime {
-				lastEventTime = event.Timestamp
-			}
-		}
-
-		if lastPage {
-			cache.Cache.Expire(logGroupName, lastEventTime)
-		}
-
-		return true
-	}
-
 	for {
 		select {
 		case <-ctx.Done():
@@ -190,9 +166,9 @@ func (cwl *Client) tail(ctx context.Context, logGroupName string,
 			return err
 		}
 
-		streamNames := []*string{}
+		streamNames := []string{}
 		for _, stream := range streams {
-			streamNames = append(streamNames, stream.Name)
+			streamNames = append(streamNames, *stream.Name)
 			cwl.showNewStream(logGroupName, stream)
 		}
 
@@ -208,7 +184,7 @@ func (cwl *Client) tail(ctx context.Context, logGroupName string,
 			LogGroupName:   aws.String(logGroupName),
 			LogStreamNames: streamNames,
 			Interleaved:    aws.Bool(true),
-			StartTime:      lastEventTime,
+			StartTime:      aws.Int64(*lastEventTime),
 		}
 		if cwl.config.FilterPattern != "" {
 			input.FilterPattern = aws.String(cwl.config.FilterPattern)
@@ -217,16 +193,37 @@ func (cwl *Client) tail(ctx context.Context, logGroupName string,
 			input.EndTime = aws.Int64(cwl.config.EndTime.UTC().Unix() * 1000)
 		}
 
-		err = cwl.client.FilterLogEventsPages(input, fn)
-		if err != nil {
-			if awsErr, ok := err.(awserr.Error); ok {
-				if awsErr.Code() == "ThrottlingException" {
+		paginator := cloudwatchlogs.NewFilterLogEventsPaginator(cwl.client, input)
+		for paginator.HasMorePages() {
+			output, err := paginator.NextPage(ctx)
+			if err != nil {
+				var throttling *types.ThrottlingException
+				if errors.As(err, &throttling) {
 					log.Printf("Rate exceeded for %s. Wait for 500ms then retry.\n", logGroupName)
 					time.Sleep(500 * time.Millisecond)
 					continue
 				}
+				return errors.Wrap(err, "Unknown error while FilterLogEvents")
 			}
-			return errors.Wrap(err, "Unknown error while FilterLogEventsPages")
+
+			for _, event := range output.Events {
+				if cache.Cache.Load(logGroupName, event.EventId) {
+					continue
+				}
+				cache.Cache.Store(logGroupName, event.EventId, event.Timestamp)
+				ch <- &logEvent{
+					logGroupName: logGroupName,
+					event:        &event,
+				}
+
+				if *event.Timestamp > *lastEventTime {
+					lastEventTime = event.Timestamp
+				}
+			}
+
+			if !paginator.HasMorePages() {
+				cache.Cache.Expire(logGroupName, lastEventTime)
+			}
 		}
 
 		if cwl.config.EndTime != nil {
