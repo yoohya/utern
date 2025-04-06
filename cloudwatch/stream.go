@@ -5,26 +5,53 @@ import (
 	"math"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/awserr"
-	"github.com/aws/aws-sdk-go/service/cloudwatchlogs"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs"
+	"github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs/types"
 	"github.com/pkg/errors"
 )
 
 // LogStream is log stream
 type LogStream struct {
-	Name               *string
-	LastEventTimestamp *int64
+	Name                *string
+	LastEventTimestamp  *int64
+	FirstEventTimestamp *int64
+	LastIngestionTime   *int64
+	UploadSequenceToken *string
 }
 
 // ListStreams lists stream names matching the specified filter
 func (cwl *Client) ListStreams(ctx context.Context, groupName string, since int64) (streams []*LogStream, err error) {
 	streams = []*LogStream{}
-	fn := func(res *cloudwatchlogs.DescribeLogStreamsOutput, lastPage bool) bool {
-		hasUpdatedStream := false
-		minLastIngestionTime := int64(math.MaxInt64)
-		for _, stream := range res.LogStreams {
+	input := &cloudwatchlogs.DescribeLogStreamsInput{
+		LogGroupName: aws.String(groupName),
+	}
+	if cwl.config.LogStreamNamePrefix != "" {
+		input.LogStreamNamePrefix = aws.String(cwl.config.LogStreamNamePrefix)
+	} else {
+		input.OrderBy = types.OrderByLastEventTime
+		input.Descending = aws.Bool(true)
+	}
 
+	paginator := cloudwatchlogs.NewDescribeLogStreamsPaginator(cwl.client, input)
+	hasUpdatedStream := false
+	minLastIngestionTime := int64(math.MaxInt64)
+
+	for paginator.HasMorePages() {
+		output, err := paginator.NextPage(ctx)
+		if err != nil {
+			var resourceNotFound *types.ResourceNotFoundException
+			var throttling *types.ThrottlingException
+			if errors.As(err, &resourceNotFound) {
+				return streams, nil
+			} else if errors.As(err, &throttling) {
+				time.Sleep(500 * time.Millisecond)
+				return nil, nil
+			}
+			return nil, errors.Wrap(err, "Failed to DescribeLogStreams")
+		}
+
+		for _, stream := range output.LogStreams {
 			// If there is no log event in the log stream, FirstEventTimestamp, LastEventTimestamp, LastIngestionTime, and UploadSequenceToken will be nil.
 			// This activity is not officially documented.
 			if stream.FirstEventTimestamp == nil || stream.LastEventTimestamp == nil || stream.LastIngestionTime == nil || stream.UploadSequenceToken == nil {
@@ -47,37 +74,18 @@ func (cwl *Client) ListStreams(ctx context.Context, groupName string, since int6
 				LastEventTimestamp: stream.LastIngestionTime,
 			})
 		}
+
 		// If LogStreamNamePrefix is specified, log streams can not be sorted by LastEventTimestamp.
-		// https://docs.aws.amazon.com/sdk-for-go/api/service/cloudwatchlogs/#DescribeLogStreamsInput
 		if cwl.config.LogStreamNamePrefix != "" {
-			return true
+			break
 		}
 		if minLastIngestionTime >= since {
-			return true
+			break
 		}
-		return hasUpdatedStream
+		if !hasUpdatedStream {
+			break
+		}
 	}
 
-	input := &cloudwatchlogs.DescribeLogStreamsInput{
-		LogGroupName: aws.String(groupName)}
-	if cwl.config.LogStreamNamePrefix != "" {
-		input.LogStreamNamePrefix = aws.String(cwl.config.LogStreamNamePrefix)
-	} else {
-		input.OrderBy = aws.String("LastEventTime")
-		input.Descending = aws.Bool(true)
-	}
-
-	err = cwl.client.DescribeLogStreamsPagesWithContext(ctx, input, fn)
-	if err != nil {
-		if awsErr, ok := err.(awserr.Error); ok {
-			if awsErr.Code() == "ResourceNotFoundException" {
-				return streams, nil
-			} else if awsErr.Code() == "ThrottlingException" {
-				time.Sleep(500 * time.Millisecond)
-				return nil, nil
-			}
-		}
-		return nil, errors.Wrap(err, "Failed to DescribeLogStreams")
-	}
 	return streams, nil
 }
